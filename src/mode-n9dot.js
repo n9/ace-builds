@@ -2501,6 +2501,13 @@ var N9dotHighlightRules = function() {
 			regex: "\\s+"
 		}], arguments);
     };
+    var invalidMore = function(levels) {
+		return [{
+			token : dotToken,
+			regex : "}}",
+			next : popper(levels + 3)
+		}, invalidAny(levels)];
+    };
     var anyContent = function(levels) {
 		return wrapInner({
 			token : dotToken,
@@ -2524,15 +2531,7 @@ var N9dotHighlightRules = function() {
 				regex : "}}",
 				next : popper(levels + 3)
 			}]
-		}, paramSpec != "?" ? {
-			token : invalidToken,
-			regex : "[^:]+?(?=}})",
-			push : [{
-				token : dotToken,
-				regex : "}}",
-				next : popper(levels + 3)
-			}]
-		} : null, {
+		}, {
 			token : expressionToken,
 			regex : ".+?(?=(((" + dotParam + ")" + paramSpec + "|:)(}}|{{))|$)",
 		}, invalidAny(levels)).filter(function(_) { return _ !== null; });
@@ -2566,8 +2565,8 @@ var N9dotHighlightRules = function() {
 	    }]
     }, {
         token : dotToken,
-        regex : "{{@",
-        push : paramContent(1, "{1,2}")
+        regex : "{{\\@",
+        push : paramContent(1, "{0,3}")
     }, {
         token : dotToken,
         regex : "{{(\\:" + jsIdent + ")?#(" + dotBlockName + "|%)?",
@@ -2581,8 +2580,8 @@ var N9dotHighlightRules = function() {
 		}, invalidAny(1))
     }, {
         token : dotToken,
-        regex : "{{\\.(" + dotBlockName + ")?}}",
-        next : popper(1)
+        regex : "{{\\.(" + dotBlockName + ")?",
+        push : invalidMore(1)
     }, {
         token : dotToken,
         regex : "{{[;:]?",
