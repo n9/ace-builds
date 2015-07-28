@@ -418,7 +418,7 @@ module.exports.generateSettingsMenu = function generateSettingsMenu (editor) {
         });
         
         var el = topmenu.appendChild(document.createElement('div'));
-        var version = "1.1.9";
+        var version = "1.2.0";
         el.style.padding = "1em";
         el.textContent = "Ace version " + version;
         

@@ -2580,6 +2580,10 @@ var N9dotHighlightRules = function() {
 		}, invalidAny(1))
     }, {
         token : dotToken,
+        regex : "{{" + dotBlockName + "#",
+        push : invalidMore(1)
+    }, {
+        token : dotToken,
         regex : "{{\\.(" + dotBlockName + ")?",
         push : invalidMore(1)
     }, {

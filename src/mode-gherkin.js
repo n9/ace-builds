@@ -24,9 +24,19 @@ var GherkinHighlightRules = function() {
             regex : '"',
             next : "qqstring"
         }, {
-            token : "comment",
-            regex : "@[A-Za-z0-9]+",
-            next : "start"
+            token : "text",
+            regex : "^\\s*(?=@[\\w])",
+            next : [{
+                token : "text",
+                regex : "\\s+",
+            }, {
+                token : "variable.parameter",
+                regex : "@[\\w]+"
+            }, {
+                token : "empty",
+                regex : "",
+                next : "start"
+            }]
         }, {
             token : "comment",
             regex : "<.+>"
@@ -77,6 +87,7 @@ var GherkinHighlightRules = function() {
             defaultToken : "string"
         }]
     };
+    this.normalizeRules();
 }
 
 oop.inherits(GherkinHighlightRules, TextHighlightRules);

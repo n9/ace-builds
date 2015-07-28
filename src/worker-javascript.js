@@ -2809,15 +2809,16 @@ module.exports = {
 
 },{}],"/node_modules/jshint/src/jshint.js":[function(_dereq_,module,exports){
 
-var _        = _dereq_("underscore");
-var events   = _dereq_("events");
-var vars     = _dereq_("./vars.js");
-var messages = _dereq_("./messages.js");
-var Lexer    = _dereq_("./lex.js").Lexer;
-var reg      = _dereq_("./reg.js");
-var state    = _dereq_("./state.js").state;
-var style    = _dereq_("./style.js");
-var options  = _dereq_("./options.js");
+var _            = _dereq_("underscore");
+var events       = _dereq_("events");
+var vars         = _dereq_("./vars.js");
+var messages     = _dereq_("./messages.js");
+var Lexer        = _dereq_("./lex.js").Lexer;
+var reg          = _dereq_("./reg.js");
+var state        = _dereq_("./state.js").state;
+var style        = _dereq_("./style.js");
+var options      = _dereq_("./options.js");
+var scopeManager = _dereq_("./scope-manager.js");
 
 var JSHINT = (function() {
   "use strict";
@@ -2840,7 +2841,6 @@ var JSHINT = (function() {
     },
 
     declared, // Globals that were declared using /*global ... */ syntax.
-    exported, // Variables that are used outside of the current file.
 
     functionicity = [
       "closure", "exception", "global", "label",
@@ -2849,8 +2849,6 @@ var JSHINT = (function() {
 
     functions, // All of the functions
 
-    global, // The global scope
-    implied, // Implied globals
     inblock,
     indent,
     lookahead,
@@ -2859,9 +2857,7 @@ var JSHINT = (function() {
     membersOnly,
     predefined,    // Global variables defined by option
 
-    scope,  // The current scope
     stack,
-    unuseds,
     urls,
 
     extraModules = [],
@@ -3049,7 +3045,7 @@ var JSHINT = (function() {
     }
 
     if (state.option.globalstrict && state.option.strict !== false) {
-      state.option.strict = true;
+      state.option.strict = "global";
     }
 
     if (state.option.yui) {
@@ -3072,12 +3068,6 @@ var JSHINT = (function() {
       raw: message,
       code: code
     };
-  }
-
-  function isundef(scope, code, token, a) {
-    if (!state.ignored[code] && state.option.undef !== false) {
-      JSHINT.undefs.push([scope, code, token, a]);
-    }
   }
 
   function removeIgnoredMessages() {
@@ -3161,75 +3151,11 @@ var JSHINT = (function() {
     JSHINT.internals.push(i);
     return i;
   }
-  function addlabel(name, opts) {
-
-    var type  = opts.type;
-    var token = opts.token;
-    var isblockscoped = opts.isblockscoped;
-    if (type === "exception") {
-      if (_.has(state.funct["(context)"], name)) {
-        if (state.funct[name] !== true && !state.option.node) {
-          warning("W002", state.tokens.next, name);
-        }
-      }
-    }
-
-    if (_.has(state.funct, name) && !state.funct["(global)"]) {
-      if (state.funct[name] === true) {
-        if (state.option.latedef) {
-          if ((state.option.latedef === true && _.contains([state.funct[name], type], "unction")) ||
-              !_.contains([state.funct[name], type], "unction")) {
-            warning("W003", state.tokens.next, name);
-          }
-        }
-      } else {
-        if ((!state.option.shadow || _.contains([ "inner", "outer" ], state.option.shadow)) &&
-            type !== "exception" || state.funct["(blockscope)"].getlabel(name)) {
-          warning("W004", state.tokens.next, name);
-        }
-      }
-    }
-
-    if (state.funct["(context)"] && _.has(state.funct["(context)"], name) && type !== "function") {
-      if (state.option.shadow === "outer") {
-        warning("W123", state.tokens.next, name);
-      }
-    }
-    if (isblockscoped) {
-      state.funct["(blockscope)"].current.add(name, type, state.tokens.curr);
-      if (state.funct["(blockscope)"].atTop() && exported[name]) {
-        state.tokens.curr.exported = true;
-      }
-    } else {
-      state.funct["(blockscope)"].shadow(name);
-      state.funct[name] = type;
-
-      if (token) {
-        state.funct["(tokens)"][name] = token;
-      }
-
-      if (state.funct["(global)"]) {
-        global[name] = state.funct;
-        if (_.has(implied, name)) {
-          if (state.option.latedef) {
-            if ((state.option.latedef === true &&
-                _.contains([state.funct[name], type], "unction")) ||
-                !_.contains([state.funct[name], type], "unction")) {
-              warning("W003", state.tokens.next, name);
-            }
-          }
-
-          delete implied[name];
-        }
-      } else {
-        scope[name] = state.funct;
-      }
-    }
-  }
 
   function doOption() {
     var nt = state.tokens.next;
     var body = nt.body.match(/(-\s+)?[^\s,:]+(?:\s*:\s*(-\s+)?[^\s,]+)?/g) || [];
+
     var predef = {};
     if (nt.type === "globals") {
       body.forEach(function(g, idx) {
@@ -3275,7 +3201,7 @@ var JSHINT = (function() {
           return;
         }
 
-        exported[e] = true;
+        state.funct["(scope)"].addExported(e);
       });
     }
 
@@ -3416,15 +3342,28 @@ var JSHINT = (function() {
 
         if (key === "ignore") {
           switch (val) {
-          case "start":
-            state.ignoreLinterErrors = true;
-            break;
-          case "end":
-            state.ignoreLinterErrors = false;
-            break;
           case "line":
             state.ignoredLines[nt.line] = true;
             removeIgnoredMessages();
+            break;
+          default:
+            error("E002", nt);
+          }
+          return;
+        }
+
+        if (key === "strict") {
+          switch (val) {
+          case "true":
+          case "func":
+            state.option.strict = true;
+            break;
+          case "false":
+            state.option.strict = false;
+            break;
+          case "global":
+          case "implied":
+            state.option.strict = val;
             break;
           default:
             error("E002", nt);
@@ -3578,7 +3517,7 @@ var JSHINT = (function() {
         warning("W118", state.tokens.next, "let expressions");
       }
       isLetExpr = true;
-      state.funct["(blockscope)"].stack();
+      state.funct["(scope)"].stack();
       advance("let");
       advance("(");
       state.tokens.prev.fud();
@@ -3644,7 +3583,7 @@ var JSHINT = (function() {
       }
     }
     if (isLetExpr) {
-      state.funct["(blockscope)"].unstack();
+      state.funct["(scope)"].unstack();
     }
 
     state.nameStack.pop();
@@ -3790,10 +3729,11 @@ var JSHINT = (function() {
             this.right.id !== "." && this.right.id !== "[") {
           warning("W017", this);
         }
-        if (this.right && this.right.identifier) {
-          if (state.funct["(blockscope)"].labeltype(this.right.value) === "const") {
-            error("E013", this, this.right.value);
-          }
+
+        if (this.right && this.right.isMetaProperty) {
+          error("E031", this);
+        } else if (this.right && this.right.identifier) {
+          state.funct["(scope)"].block.modify(this.right.value, this);
         }
       }
 
@@ -3863,7 +3803,6 @@ var JSHINT = (function() {
     };
     return x;
   }
-
 
   function application(s) {
     var x = symbol(s, 42);
@@ -4003,15 +3942,8 @@ var JSHINT = (function() {
             warning("W121", left, nativeObject);
         }
 
-        if (predefined[left.value] === false &&
-            scope[left.value]["(global)"] === true) {
-          warning("W020", left);
-        } else if (left["function"]) {
-          warning("W021", left, left.value);
-        }
-
-        if (state.funct["(blockscope)"].labeltype(left.value) === "const") {
-          error("E013", left, left.value);
+        if (left.identifier && !left.isMetaProperty) {
+          state.funct["(scope)"].block.reassign(left.value, left);
         }
 
         if (left.id === ".") {
@@ -4027,8 +3959,8 @@ var JSHINT = (function() {
         } else if (left.id === "[") {
           if (state.tokens.curr.left.first) {
             state.tokens.curr.left.first.forEach(function(t) {
-              if (t && state.funct[t.value] === "const") {
-                error("E013", t, t.value);
+              if (t && t.identifier) {
+                state.funct["(scope)"].block.modify(t.value, t);
               }
             });
           } else if (!left.left) {
@@ -4041,8 +3973,12 @@ var JSHINT = (function() {
 
           that.right = expression(10);
           return that;
+        } else if (left.isMetaProperty) {
+          error("E031", that);
+          that.right = expression(10);
+          return that;
         } else if (left.identifier && !isReserved(left)) {
-          if (state.funct[left.value] === "exception") {
+          if (state.funct["(scope)"].labeltype(left.value) === "exception") {
             warning("W022", left);
           }
           state.nameStack.set(left);
@@ -4086,6 +4022,11 @@ var JSHINT = (function() {
       }
 
       if (left) {
+        if (left.isMetaProperty) {
+          error("E031", that);
+          that.right = expression(10);
+          return that;
+        }
         if (left.id === "." || left.id === "[" ||
             (left.identifier && !isReserved(left))) {
           expression(10);
@@ -4109,10 +4050,11 @@ var JSHINT = (function() {
       } else if ((!left.identifier || isReserved(left)) && left.id !== "." && left.id !== "[") {
         warning("W017", this);
       }
-      if (left && left.identifier) {
-        if (state.funct["(blockscope)"].labeltype(left.value) === "const") {
-          error("E013", this, left.value);
-        }
+
+      if (left.isMetaProperty) {
+        error("E031", this);
+      } else if (left && left.identifier) {
+        state.funct["(scope)"].block.modify(left.value, left);
       }
 
       this.left = left;
@@ -4226,7 +4168,7 @@ var JSHINT = (function() {
   }
 
   function statement() {
-    var i = indent, r, s = scope, t = state.tokens.next;
+    var i = indent, r, t = state.tokens.next, hasOwnScope = false;
 
     if (t.id === ";") {
       advance(";");
@@ -4238,27 +4180,14 @@ var JSHINT = (function() {
       warning("W024", t, t.id);
       res = false;
     }
-    if (t.value === "module" && t.type === "(identifier)") {
-      if (peek().type === "(identifier)") {
-        if (!state.inESNext()) {
-          warning("W119", state.tokens.curr, "module");
-        }
-
-        advance("module");
-        var name = identifier();
-        addlabel(name, { type: "unused", token: state.tokens.curr });
-        advance("from");
-        advance("(string)");
-        parseFinalSemicolon();
-        return;
-      }
-    }
 
     if (t.identifier && !res && peek().id === ":") {
       advance();
       advance(":");
-      scope = Object.create(s);
-      addlabel(t.value, { type: "label" });
+
+      hasOwnScope = true;
+      state.funct["(scope)"].stack();
+      state.funct["(scope)"].block.addBreakLabel(t.value, { token: state.tokens.curr });
 
       if (!state.tokens.next.labelled && state.tokens.next.value !== "{") {
         warning("W028", state.tokens.next, t.value, state.tokens.next.value);
@@ -4278,8 +4207,7 @@ var JSHINT = (function() {
 
     if (r && (!r.identifier || r.value !== "function") && (r.type !== "(punctuator)")) {
       if (!state.isStrict() &&
-          state.option.globalstrict &&
-          state.option.strict) {
+          state.option.strict === "global") {
         warning("E007");
       }
     }
@@ -4294,7 +4222,9 @@ var JSHINT = (function() {
     }
 
     indent = i;
-    scope = s;
+    if (hasOwnScope) {
+      state.funct["(scope)"].unstack();
+    }
     return r;
   }
 
@@ -4341,21 +4271,23 @@ var JSHINT = (function() {
       }
 
       advance();
-      if (state.directive[state.tokens.curr.value]) {
-        warning("W034", state.tokens.curr, state.tokens.curr.value);
+      var directive = state.tokens.curr.value;
+      if (state.directive[directive] ||
+          (directive === "use strict" && state.option.strict === "implied")) {
+        warning("W034", state.tokens.curr, directive);
       }
-
-      if (state.tokens.curr.value === "use strict") {
-        if (!state.option["(explicitNewcap)"]) {
-          state.option.newcap = true;
-        }
-        state.option.undef = true;
-      }
-      state.directive[state.tokens.curr.value] = true;
+      state.directive[directive] = true;
 
       if (p.id === ";") {
         advance(";");
       }
+    }
+
+    if (state.isStrict()) {
+      if (!state.option["(explicitNewcap)"]) {
+        state.option.newcap = true;
+      }
+      state.option.undef = true;
     }
   }
   function block(ordinary, stmt, isfunc, isfatarrow, iscase) {
@@ -4363,15 +4295,11 @@ var JSHINT = (function() {
       b = inblock,
       old_indent = indent,
       m,
-      s = scope,
       t,
       line,
       d;
 
     inblock = ordinary;
-
-    if (!ordinary || !state.option.funcscope)
-      scope = Object.create(scope);
 
     t = state.tokens.next;
 
@@ -4381,7 +4309,7 @@ var JSHINT = (function() {
 
     if (state.tokens.next.id === "{") {
       advance("{");
-      state.funct["(blockscope)"].stack();
+      state.funct["(scope)"].stack();
 
       line = state.tokens.curr.line;
       if (state.tokens.next.id !== "}") {
@@ -4419,11 +4347,13 @@ var JSHINT = (function() {
 
       advance("}", t);
 
-      state.funct["(blockscope)"].unstack();
+      state.funct["(scope)"].unstack();
 
       indent = old_indent;
     } else if (!ordinary) {
       if (isfunc) {
+        state.funct["(scope)"].stack();
+
         m = {};
         if (stmt && !isfatarrow && !state.inMoz()) {
           error("W118", state.tokens.curr, "function closure expressions");
@@ -4443,11 +4373,14 @@ var JSHINT = (function() {
             warning("E007");
           }
         }
+
+        state.funct["(scope)"].unstack();
       } else {
         error("E021", state.tokens.next, "{", state.tokens.next.value);
       }
     } else {
-      state.funct["(noblockscopedvar)"] = true;
+      state.funct["(noblockscopedvar)"] = state.tokens.next.id !== "for";
+      state.funct["(scope)"].stack();
 
       if (!stmt || state.option.curly) {
         warning("W116", state.tokens.next, "{", state.tokens.next.value);
@@ -4458,6 +4391,7 @@ var JSHINT = (function() {
       a = [statement()];
       indent -= state.option.indent;
 
+      state.funct["(scope)"].unstack();
       delete state.funct["(noblockscopedvar)"];
     }
     switch (state.funct["(verb)"]) {
@@ -4472,7 +4406,6 @@ var JSHINT = (function() {
       state.funct["(verb)"] = null;
     }
 
-    if (!ordinary || !state.option.funcscope) scope = s;
     inblock = b;
     if (ordinary && state.option.noempty && (!a || a.length === 0)) {
       warning("W035", state.tokens.prev);
@@ -4493,17 +4426,6 @@ var JSHINT = (function() {
     }
   }
 
-
-  function note_implied(tkn) {
-    var name = tkn.value;
-    var desc = Object.getOwnPropertyDescriptor(implied, name);
-
-    if (!desc)
-      implied[name] = [tkn.line];
-    else
-      desc.value.push(tkn.line);
-  }
-
   type("(number)", function() {
     return this;
   });
@@ -4519,97 +4441,12 @@ var JSHINT = (function() {
 
     nud: function() {
       var v = this.value;
-      var s = scope[v];
-      var f;
-      var block;
       if (state.tokens.next.id === "=>") {
         return this;
       }
 
-      block = state.funct["(blockscope)"].getlabel(v);
-
-      if (typeof s === "function") {
-        s = undefined;
-      } else if (!block && typeof s === "boolean") {
-        f = state.funct;
-        state.funct = functions[0];
-        addlabel(v, { type: "var" });
-        s = state.funct;
-        state.funct = f;
-      }
-      if (state.funct === s || block) {
-        switch (block ? block[v]["(type)"] : state.funct[v]) {
-        case "unused":
-          if (block) block[v]["(type)"] = "var";
-          else state.funct[v] = "var";
-          break;
-        case "unction":
-          if (block) block[v]["(type)"] = "function";
-          else state.funct[v] = "function";
-          this["function"] = true;
-          break;
-        case "const":
-          block[v]["(unused)"] = false;
-          break;
-        case "function":
-          this["function"] = true;
-          break;
-        case "label":
-          warning("W037", state.tokens.curr, v);
-          break;
-        }
-      } else {
-
-        switch (state.funct[v]) {
-        case "closure":
-        case "function":
-        case "var":
-        case "unused":
-          warning("W038", state.tokens.curr, v);
-          break;
-        case "label":
-          warning("W037", state.tokens.curr, v);
-          break;
-        case "outer":
-        case "global":
-          break;
-        default:
-          if (s === true) {
-            state.funct[v] = true;
-          } else if (s === null) {
-            warning("W039", state.tokens.curr, v);
-            note_implied(state.tokens.curr);
-          } else if (typeof s !== "object") {
-
-            if (!state.funct["(comparray)"].check(v)) {
-              isundef(state.funct, "W117", state.tokens.curr, v);
-            }
-            if (!state.funct["(global)"]) {
-              state.funct[v] = true;
-            }
-
-            note_implied(state.tokens.curr);
-          } else {
-            switch (s[v]) {
-            case "function":
-            case "unction":
-              this["function"] = true;
-              s[v] = "closure";
-              state.funct[v] = s["(global)"] ? "global" : "outer";
-              break;
-            case "var":
-            case "unused":
-              s[v] = "closure";
-              state.funct[v] = s["(global)"] ? "global" : "outer";
-              break;
-            case "closure":
-              state.funct[v] = s["(global)"] ? "global" : "outer";
-              break;
-            case "label":
-              warning("W037", state.tokens.curr, v);
-            }
-          }
-        }
+      if (!state.funct["(comparray)"].check(v)) {
+        state.funct["(scope)"].block.use(v, state.tokens.curr);
       }
       return this;
     },
@@ -4927,12 +4764,36 @@ var JSHINT = (function() {
   prefix("typeof", (function() {
     var p = expression(150);
     this.first = p;
+    
+    if (!p) { // 'typeof' followed by nothing? Give up.
+      quit("E041", this.line || 0, this.character || 0);
+    }
+    
+    if (!p) { // 'typeof' followed by nothing? Give up.
+      quit("E041", this.line || 0, this.character || 0);
+    }
     if (p.identifier) {
       p.forgiveUndef = true;
     }
     return this;
   }));
   prefix("new", function() {
+    var mp = metaProperty("target", function() {
+      if (!state.inESNext(true)) {
+        warning("W119", state.tokens.prev, "new.target");
+      }
+      var inFunction, c = state.funct;
+      while (c) {
+        inFunction = !c["(global)"];
+        if (!c["(arrow)"]) { break; }
+        c = c["(context)"];
+      }
+      if (!inFunction) {
+        warning("W136", state.tokens.prev, "new.target");
+      }
+    });
+    if (mp) { return mp; }
+
     var c = expression(155), i;
     if (c && c.id !== "function") {
       if (c.identifier) {
@@ -4962,7 +4823,8 @@ var JSHINT = (function() {
         default:
           if (c.id !== "function") {
             i = c.value.substr(0, 1);
-            if (state.option.newcap && (i < "A" || i > "Z") && !_.has(global, c.value)) {
+            if (state.option.newcap && (i < "A" || i > "Z") &&
+              !state.funct["(scope)"].isPredefined(c.value)) {
               warning("W055", state.tokens.curr);
             }
           }
@@ -5030,7 +4892,7 @@ var JSHINT = (function() {
     if (left) {
       if (left.type === "(identifier)") {
         if (left.value.match(/^[A-Z]([A-Z0-9_$]*[a-z][A-Za-z0-9_$]*)?$/)) {
-          if ("Number String Boolean Date Object Error Symbol".indexOf(left.value) === -1) {
+          if ("Array Number String Boolean Date Object Error Symbol".indexOf(left.value) === -1) {
             if (left.value === "Math") {
               warning("W063", left);
             } else if (state.option.newcap) {
@@ -5080,9 +4942,9 @@ var JSHINT = (function() {
           addInternalSrc(left, p[0].value);
         }
       }
-      if (!left.identifier && left.id !== "." && left.id !== "[" &&
-          left.id !== "(" && left.id !== "&&" && left.id !== "||" &&
-          left.id !== "?" && !(state.option.esnext && left["(name)"])) {
+      if (!left.identifier && left.id !== "." && left.id !== "[" && left.id !== "=>" &&
+          left.id !== "(" && left.id !== "&&" && left.id !== "||" && left.id !== "?" &&
+          !(state.option.esnext && left["(name)"])) {
         warning("W067", that);
       }
     }
@@ -5380,8 +5242,7 @@ var JSHINT = (function() {
     var loneArg = options && options.loneArg;
 
     if (loneArg && loneArg.identifier === true) {
-      addlabel(loneArg.value, { type: "unused", token: loneArg });
-      return [loneArg.value];
+      return [ { id: loneArg.value, token: loneArg }];
     }
 
     next = state.tokens.next;
@@ -5401,16 +5262,14 @@ var JSHINT = (function() {
         for (t in tokens) {
           t = tokens[t];
           if (t.id) {
-            params.push(t.id);
-            addlabel(t.id, { type: "unused", token: t.token });
+            params.push({ id: t.id, token: t });
           }
         }
       } else {
         if (checkPunctuators(state.tokens.next, ["..."])) pastRest = true;
         ident = identifier(true);
         if (ident) {
-          params.push(ident);
-          addlabel(ident, { type: "unused", token: state.tokens.curr });
+          params.push({ id: ident, token: state.tokens.curr });
         } else {
           while (!checkPunctuators(state.tokens.next, [",", ")"])) advance();
         }
@@ -5440,12 +5299,11 @@ var JSHINT = (function() {
     }
   }
 
-  function functor(name, token, scope, overwrites) {
+  function functor(name, token, overwrites) {
     var funct = {
       "(name)"      : name,
       "(breakage)"  : 0,
       "(loopage)"   : 0,
-      "(scope)"     : scope,
       "(tokens)"    : {},
       "(properties)": {},
 
@@ -5457,9 +5315,10 @@ var JSHINT = (function() {
       "(metrics)"   : null,
       "(statement)" : null,
       "(context)"   : null,
-      "(blockscope)": null,
+      "(scope)"     : null,
       "(comparray)" : null,
       "(generator)" : null,
+      "(arrow)"     : null,
       "(params)"    : null
     };
 
@@ -5474,7 +5333,7 @@ var JSHINT = (function() {
     _.extend(funct, overwrites);
 
     if (funct["(context)"]) {
-      funct["(blockscope)"] = funct["(context)"]["(blockscope)"];
+      funct["(scope)"] = funct["(context)"]["(scope)"];
       funct["(comparray)"]  = funct["(context)"]["(comparray)"];
     }
 
@@ -5522,7 +5381,6 @@ var JSHINT = (function() {
     var f, name, statement, classExprBinding, isGenerator, isArrow;
     var oldOption = state.option;
     var oldIgnored = state.ignored;
-    var oldScope  = scope;
 
     if (options) {
       name = options.name;
@@ -5534,11 +5392,11 @@ var JSHINT = (function() {
 
     state.option = Object.create(state.option);
     state.ignored = Object.create(state.ignored);
-    scope = Object.create(scope);
 
-    state.funct = functor(name || state.nameStack.infer(), state.tokens.next, scope, {
+    state.funct = functor(name || state.nameStack.infer(), state.tokens.next, {
       "(statement)": statement,
       "(context)":   state.funct,
+      "(arrow)":     isArrow,
       "(generator)": isGenerator
     });
 
@@ -5547,16 +5405,24 @@ var JSHINT = (function() {
 
     functions.push(state.funct);
 
+    var params = functionparams(options);
+    var paramsIds;
+    if (params) {
+      paramsIds = _.map(params, function(token) {
+        return token.id;
+      });
+    }
+    state.funct["(scope)"].stackParams(params, true);
+    state.funct["(params)"] = paramsIds;
+    state.funct["(metrics)"].verifyMaxParametersPerFunction(paramsIds);
+
     if (name) {
-      addlabel(name, { type: "function" });
+      state.funct["(scope)"].funct.add(name, "function", state.tokens.curr, false);
     }
 
     if (classExprBinding) {
-      addlabel(classExprBinding, { type: "function" });
+      state.funct["(scope)"].funct.add(classExprBinding, "function", state.tokens.curr, false);
     }
-
-    state.funct["(params)"] = functionparams(options);
-    state.funct["(metrics)"].verifyMaxParametersPerFunction(state.funct["(params)"]);
 
     if (isArrow) {
       if (!state.option.esnext) {
@@ -5578,17 +5444,12 @@ var JSHINT = (function() {
     state.funct["(metrics)"].verifyMaxStatementsPerFunction();
     state.funct["(metrics)"].verifyMaxComplexityPerFunction();
     state.funct["(unusedOption)"] = state.option.unused;
-
-    scope = oldScope;
     state.option = oldOption;
     state.ignored = oldIgnored;
     state.funct["(last)"] = state.tokens.curr.line;
     state.funct["(lastcharacter)"] = state.tokens.curr.character;
 
-    _.map(Object.keys(state.funct), function(key) {
-      if (key[0] === "(") return;
-      state.funct["(blockscope)"].unshadow(key);
-    });
+    state.funct["(scope)"].unstack(); // also does usage and label checks
 
     state.funct = state.funct["(context)"];
 
@@ -5670,6 +5531,21 @@ var JSHINT = (function() {
           warning("W078", props[name].setterToken);
         }
       }
+    }
+  }
+
+  function metaProperty(name, c) {
+    if (checkPunctuators(state.tokens.next, ".")) {
+      var left = state.tokens.curr.id;
+      advance(".");
+      var id = identifier();
+      state.tokens.curr.isMetaProperty = true;
+      if (name !== id) {
+        error("E057", state.tokens.prev, left, id);
+      } else {
+        c();
+      }
+      return state.tokens.curr;
     }
   }
 
@@ -5788,7 +5664,7 @@ var JSHINT = (function() {
   }(delim("{")));
 
   function destructuringExpression() {
-    var id, ids;
+    var ids;
     var identifiers = [];
     if (!state.inESNext()) {
       warning("W104", state.tokens.curr, "destructuring expression");
@@ -5816,46 +5692,76 @@ var JSHINT = (function() {
       }
       return false;
     };
-    if (checkPunctuators(state.tokens.next, ["["])) {
-      advance("[");
-      var element_after_rest = false;
-      if (nextInnerDE() && checkPunctuators(state.tokens.next, [","]) &&
-          !element_after_rest) {
-        warning("W130", state.tokens.next);
-        element_after_rest = true;
-      }
-      while (!checkPunctuators(state.tokens.next, ["]"])) {
-        advance(",");
-        if (checkPunctuators(state.tokens.next, ["]"])) {
-          break;
-        }
-        if (nextInnerDE() && checkPunctuators(state.tokens.next, [","]) &&
-            !element_after_rest) {
-          warning("W130", state.tokens.next);
-          element_after_rest = true;
-        }
-      }
-      advance("]");
-    } else if (checkPunctuators(state.tokens.next, ["{"])) {
-      advance("{");
-      id = identifier();
-      if (checkPunctuators(state.tokens.next, [":"])) {
+    var assignmentProperty = function() {
+      var id;
+      if (checkPunctuators(state.tokens.next, ["["])) {
+        advance("[");
+        expression(10);
+        advance("]");
+        advance(":");
+        nextInnerDE();
+      } else if (state.tokens.next.id === "(string)" ||
+                 state.tokens.next.id === "(number)") {
+        advance();
         advance(":");
         nextInnerDE();
       } else {
-        identifiers.push({ id: id, token: state.tokens.curr });
-      }
-      while (!checkPunctuators(state.tokens.next, ["}"])) {
-        advance(",");
-        if (checkPunctuators(state.tokens.next, ["}"])) {
-          break;
-        }
         id = identifier();
         if (checkPunctuators(state.tokens.next, [":"])) {
           advance(":");
           nextInnerDE();
         } else {
           identifiers.push({ id: id, token: state.tokens.curr });
+        }
+      }
+    };
+    if (checkPunctuators(state.tokens.next, ["["])) {
+      advance("[");
+      if (checkPunctuators(state.tokens.next, ["]"])) {
+        warning("W137", state.tokens.curr);
+      }
+      var element_after_rest = false;
+      while (!checkPunctuators(state.tokens.next, ["]"])) {
+        if (nextInnerDE() && !element_after_rest &&
+            checkPunctuators(state.tokens.next, [","])) {
+          warning("W130", state.tokens.next);
+          element_after_rest = true;
+        }
+        if (checkPunctuators(state.tokens.next, ["="])) {
+          if (checkPunctuators(state.tokens.prev, ["..."])) {
+            advance("]");
+          } else {
+            advance("=");
+          }
+          if (state.tokens.next.id === "undefined") {
+            warning("W080", state.tokens.prev, state.tokens.prev.value);
+          }
+          expression(10);
+        }
+        if (!checkPunctuators(state.tokens.next, ["]"])) {
+          advance(",");
+        }
+      }
+      advance("]");
+    } else if (checkPunctuators(state.tokens.next, ["{"])) {
+      advance("{");
+      if (checkPunctuators(state.tokens.next, ["}"])) {
+        warning("W137", state.tokens.curr);
+      }
+      while (!checkPunctuators(state.tokens.next, ["}"])) {
+        assignmentProperty();
+        if (checkPunctuators(state.tokens.next, ["="])) {
+          advance("=");
+          if (state.tokens.next.id === "undefined") {
+            warning("W080", state.tokens.prev, state.tokens.prev.value);
+          }
+          expression(10);
+        }
+        if (!checkPunctuators(state.tokens.next, ["}"])) {
+          advance(",");
+          if (checkPunctuators(state.tokens.next, ["}"])) {
+            break;
+          }
         }
       }
       advance("}");
@@ -5897,7 +5803,7 @@ var JSHINT = (function() {
         warning("W118", state.tokens.next, "let block");
       }
       advance("(");
-      state.funct["(blockscope)"].stack();
+      state.funct["(scope)"].stack();
       letblock = true;
     } else if (state.funct["(noblockscopedvar)"]) {
       error("E048", state.tokens.curr, isConst ? "Const" : "Let");
@@ -5912,40 +5818,11 @@ var JSHINT = (function() {
       } else {
         tokens = [ { id: identifier(), token: state.tokens.curr } ];
         lone = true;
-        if (inexport) {
-          exported[state.tokens.curr.value] = true;
-          state.tokens.curr.exported = true;
-        }
       }
-      for (var t in tokens) {
-        if (tokens.hasOwnProperty(t)) {
-          t = tokens[t];
-          if (state.inESNext()) {
-            if (state.funct["(blockscope)"].current.labeltype(t.id) === "const") {
-              warning("E011", null, t.id);
-            }
-          }
-          if (state.funct["(global)"]) {
-            if (predefined[t.id] === false) {
-              warning("W079", t.token, t.id);
-            }
-          }
-          if (t.id && !state.funct["(noblockscopedvar)"]) {
-            addlabel(t.id, {
-              type: isConst ? "const" : "unused",
-              token: t.token,
-              isblockscoped: true });
-            names.push(t.token);
-          }
-        }
-      }
-
-      statement.first = statement.first.concat(names);
 
       if (!prefix && isConst && state.tokens.next.id !== "=") {
         warning("E012", state.tokens.curr, state.tokens.curr.value);
       }
-
       if (state.tokens.next.id === "=") {
         advance("=");
         if (!prefix && state.tokens.next.id === "undefined") {
@@ -5962,6 +5839,29 @@ var JSHINT = (function() {
         }
       }
 
+      for (var t in tokens) {
+        if (tokens.hasOwnProperty(t)) {
+          t = tokens[t];
+          if (state.funct["(scope)"].block.isGlobal()) {
+            if (predefined[t.id] === false) {
+              warning("W079", t.token, t.id);
+            }
+          }
+          if (t.id && !state.funct["(noblockscopedvar)"]) {
+            state.funct["(scope)"].addlabel(t.id, {
+              type: type,
+              token: t.token });
+            names.push(t.token);
+
+            if (lone && inexport) {
+              state.funct["(scope)"].setExported(t.token.value, t.token);
+            }
+          }
+        }
+      }
+
+      statement.first = statement.first.concat(names);
+
       if (state.tokens.next.id !== ",") {
         break;
       }
@@ -5971,7 +5871,7 @@ var JSHINT = (function() {
       advance(")");
       block(true, true);
       statement.block = true;
-      state.funct["(blockscope)"].unstack();
+      state.funct["(scope)"].unstack();
     }
 
     return statement;
@@ -6003,50 +5903,6 @@ var JSHINT = (function() {
       } else {
         tokens = [ { id: identifier(), token: state.tokens.curr } ];
         lone = true;
-        if (inexport) {
-          exported[state.tokens.curr.value] = true;
-          state.tokens.curr.exported = true;
-        }
-      }
-      for (var t in tokens) {
-        if (tokens.hasOwnProperty(t)) {
-          t = tokens[t];
-          if (state.inESNext()) {
-            if (state.funct["(blockscope)"].labeltype(t.id) === "const") {
-              warning("E011", null, t.id);
-            }
-          }
-          if (!implied && state.funct["(global)"]) {
-            if (predefined[t.id] === false) {
-              warning("W079", t.token, t.id);
-            } else if (state.option.futurehostile === false) {
-              if ((!state.inES5() && vars.ecmaIdentifiers[5][t.id] === false) ||
-                  (!state.inESNext() && vars.ecmaIdentifiers[6][t.id] === false)) {
-                warning("W129", t.token, t.id);
-              }
-            }
-          }
-          if (t.id) {
-            if (implied === "for") {
-              var ident = t.token.value;
-              switch (state.funct[ident]) {
-              case "unused":
-                state.funct[ident] = "var";
-                break;
-              case "var":
-                break;
-              default:
-                if (!state.funct["(blockscope)"].getlabel(ident) &&
-                    !(scope[ident] || {})[ident]) {
-                  if (report) warning("W088", t.token, ident);
-                }
-              }
-            } else {
-              addlabel(t.id, { type: "unused", token: t.token });
-            }
-            names.push(t.token);
-          }
-        }
       }
 
       if (!prefix && report && state.option.varstmt) {
@@ -6054,7 +5910,6 @@ var JSHINT = (function() {
       }
 
       this.first = this.first.concat(names);
-
       if (state.tokens.next.id === "=") {
         state.nameStack.set(state.tokens.curr);
 
@@ -6074,6 +5929,40 @@ var JSHINT = (function() {
           tokens[0].first = value;
         } else {
           destructuringExpressionMatch(names, value);
+        }
+      }
+
+      for (var t in tokens) {
+        if (tokens.hasOwnProperty(t)) {
+          t = tokens[t];
+          if (!implied && state.funct["(global)"]) {
+            if (predefined[t.id] === false) {
+              warning("W079", t.token, t.id);
+            } else if (state.option.futurehostile === false) {
+              if ((!state.inES5() && vars.ecmaIdentifiers[5][t.id] === false) ||
+                (!state.inESNext() && vars.ecmaIdentifiers[6][t.id] === false)) {
+                warning("W129", t.token, t.id);
+              }
+            }
+          }
+          if (t.id) {
+            if (implied === "for") {
+
+              if (!state.funct["(scope)"].has(t.id)) {
+                if (report) warning("W088", t.token, t.id);
+              }
+              state.funct["(scope)"].block.use(t.id, t.token);
+            } else {
+              state.funct["(scope)"].addlabel(t.id, {
+                type: "var",
+                token: t.token });
+
+              if (lone && inexport) {
+                state.funct["(scope)"].setExported(t.id, t.token);
+              }
+            }
+            names.push(t.token);
+          }
         }
       }
 
@@ -6097,7 +5986,10 @@ var JSHINT = (function() {
     }
     if (isStatement) {
       this.name = identifier();
-      addlabel(this.name, { type: "unused", token: state.tokens.curr });
+
+      state.funct["(scope)"].addlabel(this.name, {
+        type: "class",
+        token: state.tokens.curr });
     } else if (state.tokens.next.identifier && state.tokens.next.value !== "extends") {
       this.name = identifier();
       this.namedExpr = true;
@@ -6227,7 +6119,8 @@ var JSHINT = (function() {
     checkProperties(props);
   }
 
-  blockstmt("function", function() {
+  blockstmt("function", function(context) {
+    var inexport = context && context.inexport;
     var generator = false;
     if (state.tokens.next.value === "*") {
       advance("*");
@@ -6245,11 +6138,13 @@ var JSHINT = (function() {
 
     if (i === undefined) {
       warning("W025");
+    } else if (inexport) {
+      state.funct["(scope)"].setExported(i, state.tokens.prev);
     }
-    if (state.funct["(blockscope)"].labeltype(i) === "const") {
-      warning("E011", null, i);
-    }
-    addlabel(i, { type: "unction", token: state.tokens.curr });
+
+    state.funct["(scope)"].addlabel(i, {
+      type: "function",
+      token: state.tokens.curr });
 
     doFunction({
       name: i,
@@ -6276,11 +6171,8 @@ var JSHINT = (function() {
     var i = optionalidentifier();
     var fn = doFunction({ name: i, type: generator ? "generator" : null });
 
-    function isVariable(name) { return name[0] !== "("; }
-    function isLocal(name) { return fn[name] === "var"; }
-
     if (!state.option.loopfunc && state.funct["(loopage)"]) {
-      if (_.some(fn, function(val, name) { return isVariable(name) && !isLocal(name); })) {
+      if (fn["(isCapturing)"]) {
         warning("W083");
       }
     }
@@ -6309,7 +6201,7 @@ var JSHINT = (function() {
     state.condition = false;
     var s = block(true, true);
     if (forinifcheck && forinifcheck.type === "(negative)") {
-      if (s && s.length === 1 && s[0].type === "(identifier)" && s[0].value === "continue") {
+      if (s && s[0] && s[0].type === "(identifier)" && s[0].value === "continue") {
         forinifcheck.type = "(negative-with-continue)";
       }
     }
@@ -6329,33 +6221,25 @@ var JSHINT = (function() {
     var b;
 
     function doCatch() {
-      var oldScope = scope;
-      var e;
+      var params = [];
 
       advance("catch");
       advance("(");
 
-      scope = Object.create(oldScope);
-
-      e = state.tokens.next.value;
-      if (state.tokens.next.type !== "(identifier)") {
-        e = null;
-        warning("E030", state.tokens.next, e);
+      if (checkPunctuators(state.tokens.next, ["[", "{"])) {
+        var tokens = destructuringExpression();
+        _.each(tokens, function(token) {
+          if (token.id) {
+            params.push({ id: token.id, token: token });
+          }
+        });
+      } else if (state.tokens.next.type !== "(identifier)") {
+        warning("E030", state.tokens.next, state.tokens.next.value);
+      } else {
+        params.push({ id: identifier(), token: state.tokens.curr, type: "exception" });
       }
 
-      advance();
-
-      state.funct = functor("(catch)", state.tokens.next, scope, {
-        "(context)"  : state.funct,
-        "(breakage)" : state.funct["(breakage)"],
-        "(loopage)"  : state.funct["(loopage)"],
-        "(statement)": false,
-        "(catch)"    : true
-      });
-
-      if (e) {
-        addlabel(e, { type: "exception" });
-      }
+      state.funct["(scope)"].stackParams(params);
 
       if (state.tokens.next.value === "if") {
         if (!state.inMoz()) {
@@ -6367,16 +6251,9 @@ var JSHINT = (function() {
 
       advance(")");
 
-      state.tokens.curr.funct = state.funct;
-      functions.push(state.funct);
-
       block(false);
 
-      scope = oldScope;
-
-      state.funct["(last)"] = state.tokens.curr.line;
-      state.funct["(lastcharacter)"] = state.tokens.curr.character;
-      state.funct = state.funct["(context)"];
+      state.funct["(scope)"].unstack();
     }
 
     block(true);
@@ -6537,6 +6414,7 @@ var JSHINT = (function() {
         indent -= state.option.indent;
       }
     }
+    return this;
   }).labelled = true;
 
   stmt("debugger", function() {
@@ -6622,7 +6500,7 @@ var JSHINT = (function() {
       } else if (state.tokens.next.id === "let" || state.tokens.next.id === "const") {
         advance(state.tokens.next.id);
         letscope = true;
-        state.funct["(blockscope)"].stack();
+        state.funct["(scope)"].stack();
         state.tokens.curr.fud({ prefix: true });
       } else {
         Object.create(varstatement).fud({ prefix: true, implied: "for", ignore: !ok });
@@ -6671,7 +6549,7 @@ var JSHINT = (function() {
         } else if (state.tokens.next.id === "let") {
           advance("let");
           letscope = true;
-          state.funct["(blockscope)"].stack();
+          state.funct["(scope)"].stack();
           state.tokens.curr.fud();
         } else {
           for (;;) {
@@ -6709,7 +6587,7 @@ var JSHINT = (function() {
 
     }
     if (letscope) {
-      state.funct["(blockscope)"].unstack();
+      state.funct["(scope)"].unstack();
     }
     return this;
   }).labelled = true;
@@ -6718,22 +6596,19 @@ var JSHINT = (function() {
   stmt("break", function() {
     var v = state.tokens.next.value;
 
-    if (state.funct["(breakage)"] === 0)
-      warning("W052", state.tokens.next, this.value);
-
     if (!state.option.asi)
       nolinebreak(this);
 
-    if (state.tokens.next.id !== ";" && !state.tokens.next.reach) {
-      if (state.tokens.curr.line === startLine(state.tokens.next)) {
-        if (state.funct[v] !== "label") {
-          warning("W090", state.tokens.next, v);
-        } else if (scope[v] !== state.funct) {
-          warning("W091", state.tokens.next, v);
-        }
-        this.first = state.tokens.next;
-        advance();
+    if (state.tokens.next.id !== ";" && !state.tokens.next.reach &&
+        state.tokens.curr.line === startLine(state.tokens.next)) {
+      if (!state.funct["(scope)"].funct.hasBreakLabel(v)) {
+        warning("W090", state.tokens.next, v);
       }
+      this.first = state.tokens.next;
+      advance();
+    } else {
+      if (state.funct["(breakage)"] === 0)
+        warning("W052", state.tokens.next, this.value);
     }
 
     reachable(this);
@@ -6747,22 +6622,20 @@ var JSHINT = (function() {
 
     if (state.funct["(breakage)"] === 0)
       warning("W052", state.tokens.next, this.value);
+    if (!state.funct["(loopage)"])
+      warning("W052", state.tokens.next, this.value);
 
     if (!state.option.asi)
       nolinebreak(this);
 
     if (state.tokens.next.id !== ";" && !state.tokens.next.reach) {
       if (state.tokens.curr.line === startLine(state.tokens.next)) {
-        if (state.funct[v] !== "label") {
+        if (!state.funct["(scope)"].funct.hasBreakLabel(v)) {
           warning("W090", state.tokens.next, v);
-        } else if (scope[v] !== state.funct) {
-          warning("W091", state.tokens.next, v);
         }
         this.first = state.tokens.next;
         advance();
       }
-    } else if (!state.funct["(loopage)"]) {
-      warning("W052", state.tokens.next, this.value);
     }
 
     reachable(this);
@@ -6859,7 +6732,10 @@ var JSHINT = (function() {
 
     if (state.tokens.next.identifier) {
       this.name = identifier();
-      addlabel(this.name, { type: "unused", token: state.tokens.curr });
+      state.funct["(scope)"].addlabel(this.name, {
+        type: "const",
+        token: state.tokens.curr });
+
       if (state.tokens.next.value === ",") {
         advance(",");
       } else {
@@ -6874,7 +6750,9 @@ var JSHINT = (function() {
       advance("as");
       if (state.tokens.next.identifier) {
         this.name = identifier();
-        addlabel(this.name, { type: "unused", token: state.tokens.curr });
+        state.funct["(scope)"].addlabel(this.name, {
+          type: "const",
+          token: state.tokens.curr });
       }
     } else {
       advance("{");
@@ -6894,7 +6772,9 @@ var JSHINT = (function() {
           advance("as");
           importName = identifier();
         }
-        addlabel(importName, { type: "unused", token: state.tokens.curr });
+        state.funct["(scope)"].addlabel(importName, {
+          type: "const",
+          token: state.tokens.curr });
 
         if (state.tokens.next.value === ",") {
           advance(",");
@@ -6922,7 +6802,7 @@ var JSHINT = (function() {
       ok = false;
     }
 
-    if (!state.funct["(global)"] || !state.funct["(blockscope)"].atTop()) {
+    if (!state.funct["(scope)"].block.isGlobal()) {
       error("E053", state.tokens.curr);
       ok = false;
     }
@@ -6951,9 +6831,11 @@ var JSHINT = (function() {
         identifier = token.value;
       }
 
-      addlabel(identifier, {
-        type: "function", token: token
-      });
+      state.funct["(scope)"].addlabel(identifier, {
+        type: "function",
+        token: token });
+
+      state.funct["(scope)"].setExported(identifier, token);
 
       return this;
     }
@@ -6967,7 +6849,6 @@ var JSHINT = (function() {
         }
         advance();
 
-        state.tokens.curr.exported = ok;
         exportedTokens.push(state.tokens.curr);
 
         if (state.tokens.next.value === "as") {
@@ -6993,11 +6874,7 @@ var JSHINT = (function() {
         advance("(string)");
       } else if (ok) {
         exportedTokens.forEach(function(token) {
-          if (!state.funct[token.value]) {
-            isundef(state.funct, "W117", token, token.value);
-          }
-          exported[token.value] = true;
-          state.funct["(blockscope)"].setExported(token.value);
+          state.funct["(scope)"].setExported(token.value, token);
         });
       }
       return this;
@@ -7015,14 +6892,11 @@ var JSHINT = (function() {
     } else if (state.tokens.next.id === "function") {
       this.block = true;
       advance("function");
-      exported[state.tokens.next.value] = ok;
-      state.tokens.next.exported = true;
-      state.syntax["function"].fud();
+      state.syntax["function"].fud({ inexport:true });
     } else if (state.tokens.next.id === "class") {
       this.block = true;
       advance("class");
-      exported[state.tokens.next.value] = ok;
-      state.tokens.next.exported = true;
+      state.funct["(scope)"].setExported(state.tokens.next.value, state.tokens.next);
       state.syntax["class"].fud();
     } else {
       error("E024", state.tokens.next, state.tokens.next.value);
@@ -7061,14 +6935,15 @@ var JSHINT = (function() {
   FutureReservedWord("volatile");
 
   var lookupBlockType = function() {
-    var pn, pn1;
+    var pn, pn1, prev;
     var i = -1;
     var bracketStack = 0;
     var ret = {};
     if (checkPunctuators(state.tokens.curr, ["[", "{"]))
       bracketStack += 1;
     do {
-      pn = (i === -1) ? state.tokens.next : peek(i);
+      prev = i === -1 ? state.tokens.curr : pn;
+      pn = i === -1 ? state.tokens.next : peek(i);
       pn1 = peek(i + 1);
       i = i + 1;
       if (checkPunctuators(pn, ["[", "{"])) {
@@ -7076,7 +6951,8 @@ var JSHINT = (function() {
       } else if (checkPunctuators(pn, ["]", "}"])) {
         bracketStack -= 1;
       }
-      if (pn.identifier && pn.value === "for" && bracketStack === 1) {
+      if (pn.identifier && pn.value === "for" &&
+          !checkPunctuators(prev, ".") && bracketStack === 1) {
         ret.isCompArray = true;
         ret.notJson = true;
         break;
@@ -7091,7 +6967,7 @@ var JSHINT = (function() {
           break;
         }
       }
-      if (pn.value === ";") {
+      if (checkPunctuators(pn, [";"])) {
         ret.isBlock = true;
         ret.notJson = true;
       }
@@ -7205,7 +7081,7 @@ var JSHINT = (function() {
             if (v.unused)
               warning("W098", v.token, v.raw_text || v.value);
             if (v.undef)
-              isundef(v.state.funct, "W117", v.token, v.value);
+              state.funct["(scope)"].block.use(v.value, v.token);
           });
           _carrays.splice(-1, 1);
           _current = _carrays[_carrays.length - 1];
@@ -7241,11 +7117,11 @@ var JSHINT = (function() {
             }
             return true;
           } else if (_current && _current.mode === "generate") {
-            isundef(state.funct, "W117", state.tokens.curr, v);
+            state.funct["(scope)"].block.use(v, state.tokens.curr);
             return true;
           } else if (_current && _current.mode === "filter") {
             if (use(v)) {
-              isundef(state.funct, "W117", state.tokens.curr, v);
+              state.funct["(scope)"].block.use(v, state.tokens.curr);
             }
             return true;
           }
@@ -7337,139 +7213,6 @@ var JSHINT = (function() {
     }
   }
 
-  var warnUnused = function(name, tkn, type, unused_opt) {
-    var line = tkn.line;
-    var chr  = tkn.from;
-    var raw_name = tkn.raw_text || name;
-
-    if (unused_opt === undefined) {
-      unused_opt = state.option.unused;
-    }
-
-    if (unused_opt === true) {
-      unused_opt = "last-param";
-    }
-
-    var warnable_types = {
-      "vars": ["var"],
-      "last-param": ["var", "param"],
-      "strict": ["var", "param", "last-param"]
-    };
-
-    if (unused_opt) {
-      if (warnable_types[unused_opt] && warnable_types[unused_opt].indexOf(type) !== -1) {
-        if (!tkn.exported) {
-          warningAt("W098", line, chr, raw_name);
-        }
-      }
-    }
-
-    unuseds.push({
-      name: name,
-      line: line,
-      character: chr
-    });
-  };
-
-  var blockScope = function() {
-    var _current = {};
-    var _variables = [_current];
-
-    function _checkBlockLabels() {
-      for (var t in _current) {
-        var label = _current[t],
-            labelType = label["(type)"];
-        if (labelType === "unused" || (labelType === "const" && label["(unused)"])) {
-          if (state.option.unused) {
-            var tkn = _current[t]["(token)"];
-            if (tkn.exported) {
-              continue;
-            }
-
-            warnUnused(t, tkn, "var");
-          }
-        }
-      }
-    }
-
-    function _getLabel(l) {
-      for (var i = _variables.length - 1 ; i >= 0; --i) {
-        if (_.has(_variables[i], l) && !_variables[i][l]["(shadowed)"]) {
-          return _variables[i];
-        }
-      }
-    }
-
-    return {
-      stack: function() {
-        _current = {};
-        _variables.push(_current);
-      },
-
-      unstack: function() {
-        _checkBlockLabels();
-        _variables.splice(_variables.length - 1, 1);
-        _current = _.last(_variables);
-      },
-
-      getlabel: _getLabel,
-
-      labeltype: function(l) {
-        var block = _getLabel(l);
-        if (block) {
-          return block[l]["(type)"];
-        }
-        return null;
-      },
-
-      shadow: function(name) {
-        for (var i = _variables.length - 1; i >= 0; i--) {
-          if (_.has(_variables[i], name)) {
-            _variables[i][name]["(shadowed)"] = true;
-          }
-        }
-      },
-
-      unshadow: function(name) {
-        for (var i = _variables.length - 1; i >= 0; i--) {
-          if (_.has(_variables[i], name)) {
-            _variables[i][name]["(shadowed)"] = false;
-          }
-        }
-      },
-
-      atTop: function() {
-        return _variables.length === 1;
-      },
-
-      setExported: function(id) {
-        if (state.funct["(blockscope)"].atTop()) {
-          var item = _current[id];
-          if (item && item["(token)"]) {
-            item["(token)"].exported = true;
-          }
-        }
-      },
-
-      current: {
-        labeltype: function(t) {
-          if (_current[t]) {
-            return _current[t]["(type)"];
-          }
-          return null;
-        },
-
-        has: function(t) {
-          return _.has(_current, t);
-        },
-
-        add: function(t, type, tok) {
-          _current[t] = { "(type)" : type, "(token)": tok, "(shadowed)": false, "(unused)": true };
-        }
-      }
-    };
-  };
-
   var escapeRegex = function(str) {
     return str.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
   };
@@ -7499,7 +7242,7 @@ var JSHINT = (function() {
     combine(predefined, g || {});
 
     declared = Object.create(null);
-    exported = Object.create(null);
+    var exported = Object.create(null); // Variables that live outside the current file
 
     function each(obj, cb) {
       if (!obj)
@@ -7558,12 +7301,19 @@ var JSHINT = (function() {
     state.option.maxerr = state.option.maxerr || 50;
 
     indent = 1;
-    global = Object.create(predefined);
-    scope = global;
 
-    state.funct = functor("(global)", null, scope, {
+    var scopeManagerInst = scopeManager(state, predefined, exported, declared);
+    scopeManagerInst.on("warning", function(ev) {
+      warning.apply(null, [ ev.code, ev.token].concat(ev.data));
+    });
+
+    scopeManagerInst.on("error", function(ev) {
+      error.apply(null, [ ev.code, ev.token ].concat(ev.data));
+    });
+
+    state.funct = functor("(global)", null, {
       "(global)"    : true,
-      "(blockscope)": blockScope(),
+      "(scope)"     : scopeManagerInst,
       "(comparray)" : arrayComprehension(),
       "(metrics)"   : createMetrics(state.tokens.next)
     });
@@ -7573,10 +7323,8 @@ var JSHINT = (function() {
     stack = null;
     member = {};
     membersOnly = null;
-    implied = {};
     inblock = false;
     lookahead = [];
-    unuseds = [];
 
     if (!isString(s) && !Array.isArray(s)) {
       errorAt("E004", 0);
@@ -7687,8 +7435,8 @@ var JSHINT = (function() {
       default:
         directives();
 
-        if (state.isStrict()) {
-          if (!state.option.globalstrict) {
+        if (state.directive["use strict"]) {
+          if (state.option.strict !== "global") {
             if (!(state.option.module || state.option.node || state.option.phantom ||
               state.option.browserify)) {
               warning("W097", state.tokens.prev);
@@ -7703,109 +7451,7 @@ var JSHINT = (function() {
         quit("E041", state.tokens.curr.line);
       }
 
-      state.funct["(blockscope)"].unstack();
-
-      var markDefined = function(name, context) {
-        do {
-          if (typeof context[name] === "string") {
-
-            if (context[name] === "unused")
-              context[name] = "var";
-            else if (context[name] === "unction")
-              context[name] = "closure";
-
-            return true;
-          }
-
-          context = context["(context)"];
-        } while (context);
-
-        return false;
-      };
-
-      var clearImplied = function(name, line) {
-        if (!implied[name])
-          return;
-
-        var newImplied = [];
-        for (var i = 0; i < implied[name].length; i += 1) {
-          if (implied[name][i] !== line)
-            newImplied.push(implied[name][i]);
-        }
-
-        if (newImplied.length === 0)
-          delete implied[name];
-        else
-          implied[name] = newImplied;
-      };
-
-      var checkUnused = function(func, key) {
-        var type = func[key];
-        var tkn = func["(tokens)"][key];
-
-        if (key.charAt(0) === "(")
-          return;
-
-        if (type !== "unused" && type !== "unction")
-          return;
-        if (func["(params)"] && func["(params)"].indexOf(key) !== -1)
-          return;
-        if (func["(global)"] && _.has(exported, key))
-          return;
-
-        warnUnused(key, tkn, "var");
-      };
-      for (i = 0; i < JSHINT.undefs.length; i += 1) {
-        k = JSHINT.undefs[i].slice(0);
-
-        if (markDefined(k[2].value, k[0]) || k[2].forgiveUndef) {
-          clearImplied(k[2].value, k[2].line);
-        } else if (state.option.undef) {
-          warning.apply(warning, k.slice(1));
-        }
-      }
-
-      functions.forEach(function(func) {
-        if (func["(unusedOption)"] === false) {
-          return;
-        }
-
-        for (var key in func) {
-          if (_.has(func, key)) {
-            checkUnused(func, key);
-          }
-        }
-
-        if (!func["(params)"])
-          return;
-
-        var params = func["(params)"].slice();
-        var param  = params.pop();
-        var type, unused_opt;
-
-        while (param) {
-          type = func[param];
-          unused_opt = func["(unusedOption)"] || state.option.unused;
-          unused_opt = unused_opt === true ? "last-param" : unused_opt;
-
-          if (param === "undefined")
-            return;
-
-          if (type === "unused" || type === "unction") {
-            warnUnused(param, func["(tokens)"][param], "param", func["(unusedOption)"]);
-          } else if (unused_opt === "last-param") {
-            return;
-          }
-
-          param = params.pop();
-        }
-      });
-
-      for (var key in declared) {
-        if (_.has(declared, key) && !_.has(global, key) && !_.has(exported, key)) {
-          warnUnused(key, declared[key], "var");
-        }
-      }
+      state.funct["(scope)"].unstack();
 
     } catch (err) {
       if (err && err.name === "JSHintError") {
@@ -7846,8 +7492,6 @@ var JSHINT = (function() {
       options: state.option
     };
 
-    var implieds = [];
-    var members = [];
     var fu, f, i, j, n, globals;
 
     if (itself.errors.length) {
@@ -7858,24 +7502,16 @@ var JSHINT = (function() {
       data.json = true;
     }
 
-    for (n in implied) {
-      if (_.has(implied, n)) {
-        implieds.push({
-          name: n,
-          line: implied[n]
-        });
-      }
-    }
-
-    if (implieds.length > 0) {
-      data.implieds = implieds;
+    var impliedGlobals = state.funct["(scope)"].getImpliedGlobals();
+    if (impliedGlobals.length > 0) {
+      data.implieds = impliedGlobals;
     }
 
     if (urls.length > 0) {
       data.urls = urls;
     }
 
-    globals = Object.keys(scope);
+    globals = state.funct["(scope)"].getUsedOrDefinedGlobals();
     if (globals.length > 0) {
       data.globals = globals;
     }
@@ -7910,11 +7546,11 @@ var JSHINT = (function() {
       data.functions.push(fu);
     }
 
+    var unuseds = state.funct["(scope)"].getUnuseds();
     if (unuseds.length > 0) {
       data.unused = unuseds;
     }
 
-    members = [];
     for (n in member) {
       if (typeof member[n] === "number") {
         data.member = member;
@@ -7933,7 +7569,7 @@ if (typeof exports === "object" && exports) {
   exports.JSHINT = JSHINT;
 }
 
-},{"./lex.js":"/node_modules/jshint/src/lex.js","./messages.js":"/node_modules/jshint/src/messages.js","./options.js":"/node_modules/jshint/src/options.js","./reg.js":"/node_modules/jshint/src/reg.js","./state.js":"/node_modules/jshint/src/state.js","./style.js":"/node_modules/jshint/src/style.js","./vars.js":"/node_modules/jshint/src/vars.js","events":"/node_modules/browserify/node_modules/events/events.js","underscore":"/node_modules/jshint/node_modules/underscore/underscore.js"}],"/node_modules/jshint/src/lex.js":[function(_dereq_,module,exports){
+},{"./lex.js":"/node_modules/jshint/src/lex.js","./messages.js":"/node_modules/jshint/src/messages.js","./options.js":"/node_modules/jshint/src/options.js","./reg.js":"/node_modules/jshint/src/reg.js","./scope-manager.js":"/node_modules/jshint/src/scope-manager.js","./state.js":"/node_modules/jshint/src/state.js","./style.js":"/node_modules/jshint/src/style.js","./vars.js":"/node_modules/jshint/src/vars.js","events":"/node_modules/browserify/node_modules/events/events.js","underscore":"/node_modules/jshint/node_modules/underscore/underscore.js"}],"/node_modules/jshint/src/lex.js":[function(_dereq_,module,exports){
 
 "use strict";
 
@@ -8017,6 +7653,7 @@ function Lexer(source) {
   for (var i = 0; i < state.option.indent; i += 1) {
     state.tab += " ";
   }
+  this.ignoreLinterErrors = false;
 }
 
 Lexer.prototype = {
@@ -8219,6 +7856,7 @@ Lexer.prototype = {
     var rest = this.input.substr(2);
     var startLine = this.line;
     var startChar = this.char;
+    var self = this;
 
     function commentToken(label, body, opt) {
       var special = ["jshint", "jslint", "members", "member", "globals", "global", "exported"];
@@ -8266,6 +7904,26 @@ Lexer.prototype = {
           commentType = "globals";
           break;
         default:
+          var options = body.split(":").map(function(v) {
+            return v.replace(/^\s+/, "").replace(/\s+$/, "");
+          });
+
+          if (options.length === 2) {
+            switch (options[0]) {
+            case "ignore":
+              switch (options[1]) {
+              case "start":
+                self.ignoringLinterErrors = true;
+                isSpecial = false;
+                break;
+              case "end":
+                self.ignoringLinterErrors = false;
+                isSpecial = false;
+                break;
+              }
+            }
+          }
+
           commentType = str;
         }
       });
@@ -9150,7 +8808,7 @@ Lexer.prototype = {
         return inputTrimmed.indexOf(suffix, inputTrimmed.length - suffix.length) !== -1;
       });
     };
-    if (state.ignoreLinterErrors === true) {
+    if (this.ignoringLinterErrors === true) {
       if (!startsWith("/*", "//") && !(this.inComment && endsWith("*/"))) {
         this.input = "";
       }
@@ -9473,7 +9131,7 @@ var errors = {
   E008: "Strict violation.",
   E009: "Option 'validthis' can't be used in a global scope.",
   E010: "'with' is not allowed in strict mode.",
-  E011: "const '{a}' has already been declared.",
+  E011: "'{a}' has already been declared.",
   E012: "const '{a}' is initialized to 'undefined'.",
   E013: "Attempting to override '{a}' which is a constant.",
   E014: "A regular expression literal can be confused with '/='.",
@@ -9517,7 +9175,9 @@ var errors = {
   E052: "Unclosed template literal.",
   E053: "Export declaration must be in global scope.",
   E054: "Class properties must be methods. Expected '(' but instead saw '{a}'.",
-  E055: "The '{a}' option cannot be set after any executable code."
+  E055: "The '{a}' option cannot be set after any executable code.",
+  E056: "'{a}' was used before it was declared, which is illegal for '{b}' variables.",
+  E057: "Invalid meta property: '{a}.{b}'."
 };
 
 var warnings = {
@@ -9615,7 +9275,7 @@ var warnings = {
   W089: "The body of a for in should be wrapped in an if statement to filter " +
     "unwanted properties from the prototype.",
   W090: "'{a}' is not a statement label.",
-  W091: "'{a}' is out of scope.",
+  W091: null,
   W093: "Did you mean to return a conditional instead of an assignment?",
   W094: "Unexpected comma.",
   W095: "Expected a string and instead saw {a}.",
@@ -9657,7 +9317,10 @@ var warnings = {
   W131: "Invalid parameter after rest parameter.",
   W132: "`var` declarations are forbidden. Use `let` or `const` instead.",
   W133: "Invalid for-{a} loop left-hand-side: {b}.",
-  W134: "The '{a}' option is only available when linting ECMAScript {b} code."
+  W134: "The '{a}' option is only available when linting ECMAScript {b} code.",
+  W135: "{a} may not be supported by non-browser environments.",
+  W136: "'{a}' must be in function scope.",
+  W137: "Empty destructuring."
 };
 
 var info = {
@@ -9755,7 +9418,6 @@ exports.bool = {
     nonew       : true,
     undef       : true,
     singleGroups: false,
-    strict      : true,
     varstmt: false,
     enforceall : false
   },
@@ -9817,8 +9479,7 @@ exports.val = {
   maxlen       : false,
   indent       : false,
   maxerr       : false,
-
-  predef       : false, // predef is deprecated and being replaced by globals
+  predef       : false,
   globals      : false,
   quotmark     : false,
 
@@ -9828,6 +9489,7 @@ exports.val = {
   maxparams    : false,
   maxcomplexity: false,
   shadow       : false,
+  strict      : true,
   unused       : true,
   latedef      : false,
 
@@ -9888,7 +9550,563 @@ exports.javascriptURL = /^(?:javascript|jscript|ecmascript|vbscript|livescript)\
 exports.fallsThrough = /^\s*\/\*\s*falls?\sthrough\s*\*\/\s*$/;
 exports.maxlenException = /^(?:(?:\/\/|\/\*|\*) ?)?[^ ]+$/;
 
-},{}],"/node_modules/jshint/src/state.js":[function(_dereq_,module,exports){
+},{}],"/node_modules/jshint/src/scope-manager.js":[function(_dereq_,module,exports){
+"use strict";
+
+var _      = _dereq_("underscore");
+var events = _dereq_("events");
+var scopeManager = function(state, predefined, exported, declared) {
+  function _newScope() {
+    return {
+      "(labels)": Object.create(null),
+      "(usages)": Object.create(null),
+      "(breakLabels)": Object.create(null),
+      "(parent)": _current
+    };
+  }
+
+  var _current = _newScope();
+  _current["(predefined)"] = predefined;
+  _current["(global)"] = true;
+
+  var _currentFunct = _current; // this is the block after the params = function
+  var _scopeStack = [_current];
+
+  var usedPredefinedAndGlobals = Object.create(null);
+  var impliedGlobals = {};
+  var unuseds = [];
+  var emitter = new events.EventEmitter();
+
+  function warning(code, token) {
+    emitter.emit("warning", {
+      code: code,
+      token: token,
+      data: _.slice(arguments, 2)
+    });
+  }
+
+  function error(code, token) {
+    emitter.emit("warning", {
+      code: code,
+      token: token,
+      data: _.slice(arguments, 2)
+    });
+  }
+
+  function _addUsage(labelName, token) {
+    if (token) {
+      token["(function)"] = _currentFunct;
+    }
+    if (!_.has(_current["(usages)"], labelName)) {
+      _current["(usages)"][labelName] = {
+        "(modified)": [],
+        "(reassigned)": [],
+        "(tokens)": token ? [token] : []
+      };
+    } else if (token) {
+      _current["(usages)"][labelName]["(tokens)"].push(token);
+    }
+  }
+
+  var exportedLabels = Object.keys(exported);
+  for (var i = 0; i < exportedLabels.length; i++) {
+    _addUsage(exportedLabels[i]);
+  }
+
+  var _getUnusedOption = function(unused_opt) {
+    if (unused_opt === undefined) {
+      unused_opt = state.option.unused;
+    }
+
+    if (unused_opt === true) {
+      unused_opt = "last-param";
+    }
+
+    return unused_opt;
+  };
+
+  var _warnUnused = function(name, tkn, type, unused_opt) {
+    var line = tkn.line;
+    var chr  = tkn.from;
+    var raw_name = tkn.raw_text || name;
+
+    unused_opt = _getUnusedOption(unused_opt);
+
+    var warnable_types = {
+      "vars": ["var"],
+      "last-param": ["var", "param"],
+      "strict": ["var", "param", "last-param"]
+    };
+
+    if (unused_opt) {
+      if (warnable_types[unused_opt] && warnable_types[unused_opt].indexOf(type) !== -1) {
+        warning("W098", { line: line, from: chr }, raw_name);
+      }
+    }
+    if (unused_opt || type === "var") {
+      unuseds.push({
+        name: name,
+        line: line,
+        character: chr
+      });
+    }
+  };
+  function _checkForUnused() {
+    if (_current["(isParams)"] === "function") {
+      _checkParams();
+      return;
+    }
+    var curentLabels = _current["(labels)"];
+    for (var labelName in curentLabels) {
+      if (_.has(curentLabels, labelName)) {
+        if (curentLabels[labelName]["(type)"] !== "exception" &&
+          curentLabels[labelName]["(unused)"]) {
+          _warnUnused(labelName, curentLabels[labelName]["(token)"], "var");
+        }
+      }
+    }
+  }
+  function _checkParams() {
+    var params = _current["(params)"];
+    var param = params.pop();
+    var unused_opt;
+
+    while (param) {
+      var label = _current["(labels)"][param];
+
+      unused_opt = _getUnusedOption(state.funct["(unusedOption)"]);
+      if (param === "undefined")
+        return;
+
+      if (label["(unused)"]) {
+        _warnUnused(param, label["(token)"], "param", state.funct["(unusedOption)"]);
+      } else if (unused_opt === "last-param") {
+        return;
+      }
+
+      param = params.pop();
+    }
+  }
+  function _getLabel(labelName) {
+    for (var i = _scopeStack.length - 1 ; i >= 0; --i) {
+      var scopeLabels = _scopeStack[i]["(labels)"];
+      if (_.has(scopeLabels, labelName)) {
+        return scopeLabels;
+      }
+    }
+  }
+
+  function usedSoFarInCurrentFunction(labelName) {
+    for (var i = _scopeStack.length - 1; i >= 0; i--) {
+      var current = _scopeStack[i];
+      if (_.has(current["(usages)"], labelName)) {
+        return current["(usages)"][labelName];
+      }
+      if (current === _currentFunct) {
+        break;
+      }
+    }
+    return false;
+  }
+
+  function _checkOuterShadow(labelName, token) {
+    if (state.option.shadow !== "outer") {
+      return;
+    }
+
+    var isGlobal = _currentFunct["(global)"],
+      isNewFunction = _current["(isParams)"] === "function";
+
+    var outsideCurrentFunction = !isGlobal;
+    for (var i = 0; i < _scopeStack.length; i++) {
+      var stackItem = _scopeStack[i];
+
+      if (!isNewFunction && _scopeStack[i + 1] === _currentFunct) {
+        outsideCurrentFunction = false;
+      }
+      if (outsideCurrentFunction && _.has(stackItem["(labels)"], labelName)) {
+        warning("W123", token, labelName);
+      }
+      if (_.has(stackItem["(breakLabels)"], labelName)) {
+        warning("W123", token, labelName);
+      }
+    }
+  }
+
+  function _latedefWarning(type, labelName, token) {
+    if (state.option.latedef) {
+      if ((state.option.latedef === true && type === "function") ||
+        type !== "function") {
+        warning("W003", token, labelName);
+      }
+    }
+  }
+
+  var scopeManagerInst = {
+
+    on: function(names, listener) {
+      names.split(" ").forEach(function(name) {
+        emitter.on(name, listener);
+      });
+    },
+
+    isPredefined: function(labelName) {
+      return !this.has(labelName) && _.has(_scopeStack[0]["(predefined)"], labelName);
+    },
+    stack: function() {
+      var previousScope = _current;
+      _current = _newScope();
+
+      if (previousScope["(isParams)"] === "function") {
+
+        _current["(isFunc)"] = true;
+        _current["(context)"] = _currentFunct;
+        _currentFunct = _current;
+      }
+      _scopeStack.push(_current);
+    },
+
+    unstack: function() {
+
+      var subScope = _scopeStack.length > 1 ? _scopeStack[_scopeStack.length - 2] : null;
+      var isUnstackingFunction = _current === _currentFunct;
+
+      var i, j;
+      var currentUsages = _current["(usages)"];
+      var currentLabels = _current["(labels)"];
+      var usedLabelNameList = Object.keys(currentUsages);
+      for (i = 0; i < usedLabelNameList.length; i++) {
+        var usedLabelName = usedLabelNameList[i];
+
+        var usage = currentUsages[usedLabelName];
+        var usedLabel = _.has(currentLabels, usedLabelName) && currentLabels[usedLabelName];
+        if (usedLabel) {
+
+          if (usedLabel["(useOutsideOfScope)"] && !state.option.funcscope) {
+            var usedTokens = usage["(tokens)"];
+            if (usedTokens) {
+              for (j = 0; j < usedTokens.length; j++) {
+                if (usedLabel["(function)"] === usedTokens[j]["(function)"]) {
+                  error("W038", usedTokens[j], usedLabelName);
+                }
+              }
+            }
+          }
+          _current["(labels)"][usedLabelName]["(unused)"] = false;
+          if (usedLabel["(type)"] === "const" && usage["(modified)"]) {
+            for (j = 0; j < usage["(modified)"].length; j++) {
+              error("E013", usage["(modified)"][j], usedLabelName);
+            }
+          }
+          if (usedLabel["(type)"] === "function" && usage["(reassigned)"]) {
+            for (j = 0; j < usage["(reassigned)"].length; j++) {
+              error("W021", usage["(reassigned)"][j], usedLabelName);
+            }
+          }
+          continue;
+        }
+
+        if (isUnstackingFunction) {
+          state.funct["(isCapturing)"] = true;
+        }
+
+        if (subScope) {
+          if (!_.has(subScope["(usages)"], usedLabelName)) {
+            subScope["(usages)"][usedLabelName] = usage;
+            if (isUnstackingFunction) {
+              subScope["(usages)"][usedLabelName]["(onlyUsedSubFunction)"] = true;
+            }
+          } else {
+            var subScopeUsage = subScope["(usages)"][usedLabelName];
+            subScopeUsage["(modified)"] = subScopeUsage["(modified)"].concat(usage["(modified)"]);
+            subScopeUsage["(tokens)"] = subScopeUsage["(tokens)"].concat(usage["(tokens)"]);
+            subScopeUsage["(reassigned)"] =
+              subScopeUsage["(reassigned)"].concat(usage["(reassigned)"]);
+            subScopeUsage["(onlyUsedSubFunction)"] = false;
+          }
+        } else {
+          if (_.has(_current["(predefined)"], usedLabelName)) {
+            delete declared[usedLabelName];
+            usedPredefinedAndGlobals[usedLabelName] = true;
+            if (_current["(predefined)"][usedLabelName] === false && usage["(reassigned)"]) {
+              for (j = 0; j < usage["(reassigned)"].length; j++) {
+                warning("W020", usage["(reassigned)"][j]);
+              }
+            }
+          }
+          else {
+            if (usage["(tokens)"]) {
+              for (j = 0; j < usage["(tokens)"].length; j++) {
+                var undefinedToken = usage["(tokens)"][j];
+                if (!undefinedToken.forgiveUndef) {
+                  if (state.option.undef && !undefinedToken.ignoreUndef) {
+                    warning("W117", undefinedToken, usedLabelName);
+                  }
+                  if (_.has(impliedGlobals, usedLabelName)) {
+                    impliedGlobals[usedLabelName].line.push(undefinedToken.line);
+                  } else {
+                    impliedGlobals[usedLabelName] = {
+                      name: usedLabelName,
+                      line: [undefinedToken.line]
+                    };
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      if (!subScope) {
+        Object.keys(declared)
+          .forEach(function(labelNotUsed) {
+            _warnUnused(labelNotUsed, declared[labelNotUsed], "var");
+          });
+      }
+      if (subScope && !isUnstackingFunction && _current["(isParams)"] !== "function") {
+        var labelNames = Object.keys(currentLabels);
+        for (i = 0; i < labelNames.length; i++) {
+
+          var defLabelName = labelNames[i];
+          if (!currentLabels[defLabelName]["(blockscoped)"] &&
+            currentLabels[defLabelName]["(type)"] !== "exception" &&
+            !this.funct.has(defLabelName, { excludeCurrent: true })) {
+            subScope["(labels)"][defLabelName] = currentLabels[defLabelName];
+            if (!_currentFunct["(global)"]) {
+              subScope["(labels)"][defLabelName]["(useOutsideOfScope)"] = true;
+            }
+            delete currentLabels[defLabelName];
+          }
+        }
+      }
+
+      _checkForUnused();
+
+      _scopeStack.pop();
+      if (isUnstackingFunction) {
+        _currentFunct = _scopeStack[_.findLastIndex(_scopeStack, function(scope) {
+          return scope["(isFunc)"] || scope["(global)"];
+        })];
+      }
+
+      _current = subScope;
+    },
+    stackParams: function(params, isFunction) {
+      _current = _newScope();
+      _current["(isParams)"] = isFunction ? "function" : true;
+      _current["(params)"] = [];
+
+      _scopeStack.push(_current);
+      var functionScope = this.funct;
+
+      _.each(params, function(param) {
+
+        var type = param.type || "param";
+
+        if (type === "exception") {
+          var previouslyDefinedLabelType = functionScope.labeltype(param.id);
+          if (previouslyDefinedLabelType && previouslyDefinedLabelType !== "exception") {
+            if (!state.option.node) {
+              warning("W002", state.tokens.next, param.id);
+            }
+          }
+        }
+
+        _checkOuterShadow(param.id, param.token, type);
+
+        _current["(labels)"][param.id] = {
+          "(type)" : type,
+          "(token)": param.token,
+          "(unused)": true };
+        _current["(params)"].push(param.id);
+      });
+    },
+
+    getUsedOrDefinedGlobals: function() {
+      return Object.keys(usedPredefinedAndGlobals);
+    },
+    getImpliedGlobals: function() {
+      return _.values(impliedGlobals);
+    },
+    getUnuseds: function() {
+      return unuseds;
+    },
+
+    has: function(labelName) {
+      return Boolean(_getLabel(labelName));
+    },
+
+    labeltype: function(labelName) {
+      var scopeLabels = _getLabel(labelName);
+      if (scopeLabels) {
+        return scopeLabels[labelName]["(type)"];
+      }
+      return null;
+    },
+    addExported: _addUsage,
+    setExported: function(labelName, token) {
+      this.block.use(labelName, token);
+    },
+    addlabel: function(labelName, opts) {
+
+      var type  = opts.type;
+      var token = opts.token;
+      var isblockscoped = type === "let" || type === "const";
+      _checkOuterShadow(labelName, token, type);
+      if (isblockscoped) {
+
+        var declaredInCurrentScope = _.has(_current["(labels)"], labelName);
+        if (!declaredInCurrentScope && _current === _currentFunct && !_current["(global)"]) {
+          declaredInCurrentScope = _.has(_currentFunct["(parent)"]["(labels)"], labelName);
+        }
+        if (!declaredInCurrentScope && _.has(_current["(usages)"], labelName)) {
+          var usage = _current["(usages)"][labelName];
+          if (usage["(onlyUsedSubFunction)"]) {
+            _latedefWarning(type, labelName, token);
+          } else {
+            warning("E056", token, labelName, type);
+          }
+        }
+        if (declaredInCurrentScope) {
+          warning("E011", token, labelName);
+        }
+        else if (state.option.shadow === "outer") {
+          if (scopeManagerInst.funct.has(labelName)) {
+            warning("W004", token, labelName);
+          }
+        }
+
+        scopeManagerInst.block.add(labelName, type, token, true);
+
+      } else {
+
+        var declaredInCurrentFunctionScope = scopeManagerInst.funct.has(labelName);
+        if (!declaredInCurrentFunctionScope && usedSoFarInCurrentFunction(labelName)) {
+          _latedefWarning(type, labelName, token);
+        }
+        if (scopeManagerInst.funct.has(labelName, { onlyBlockscoped: true })) {
+          warning("E011", token, labelName);
+        } else if (state.option.shadow !== true) {
+          if (declaredInCurrentFunctionScope) {
+            if (!_currentFunct["(global)"]) {
+              warning("W004", token, labelName);
+            }
+          }
+        }
+
+        scopeManagerInst.funct.add(labelName, type, token, true);
+
+        if (state.funct["(global)"]) {
+          usedPredefinedAndGlobals[labelName] = true;
+        }
+      }
+    },
+
+    funct: {
+      labeltype: function(labelName, options) {
+        var onlyBlockscoped = options && options.onlyBlockscoped;
+        var excludeParams = options && options.excludeParams;
+        var currentScopeIndex = _scopeStack.length - (options && options.excludeCurrent ? 2 : 1);
+        for (var i = currentScopeIndex; i >= 0; i--) {
+          var current = _scopeStack[i];
+          if (_.has(current["(labels)"], labelName) &&
+            (!onlyBlockscoped || current["(labels)"][labelName]["(blockscoped)"])) {
+            return current["(labels)"][labelName]["(type)"];
+          }
+          var scopeCheck = excludeParams ? _scopeStack[ i - 1 ] : current;
+          if (scopeCheck && scopeCheck["(isParams)"] === "function") {
+            return null;
+          }
+        }
+        return null;
+      },
+      hasBreakLabel: function(labelName) {
+        for (var i = _scopeStack.length - 1; i >= 0; i--) {
+          var current = _scopeStack[i];
+
+          if (_.has(current["(breakLabels)"], labelName)) {
+            return true;
+          }
+          if (current["(isParams)"] === "function") {
+            return false;
+          }
+        }
+        return false;
+      },
+      has: function(labelName, options) {
+        return Boolean(this.labeltype(labelName, options));
+      },
+      add: function(labelName, type, tok, unused) {
+        _current["(labels)"][labelName] = {
+          "(type)" : type,
+          "(token)": tok,
+          "(blockscoped)": false,
+          "(function)": _currentFunct,
+          "(unused)": unused };
+      }
+    },
+
+    block: {
+      isGlobal: function() {
+        return _current["(global)"];
+      },
+
+      use: function(labelName, token) {
+        var paramScope = _currentFunct["(parent)"];
+        if (paramScope && _.has(paramScope["(labels)"], labelName) &&
+          paramScope["(labels)"][labelName]["(type)"] === "param") {
+          if (!scopeManagerInst.funct.has(labelName, { excludeParams: true })) {
+            paramScope["(labels)"][labelName]["(unused)"] = false;
+          }
+        }
+
+        if (token && (state.ignored.W117 || state.option.undef === false)) {
+          token.ignoreUndef = true;
+        }
+
+        _addUsage(labelName, token);
+      },
+
+      reassign: function(labelName, token) {
+
+        this.modify(labelName, token);
+
+        _current["(usages)"][labelName]["(reassigned)"].push(token);
+      },
+
+      modify: function(labelName, token) {
+
+        _current["(usages)"][labelName]["(modified)"].push(token);
+      },
+      add: function(labelName, type, tok, unused) {
+        _current["(labels)"][labelName] = {
+          "(type)" : type,
+          "(token)": tok,
+          "(blockscoped)": true,
+          "(unused)": unused };
+      },
+
+      addBreakLabel: function(labelName, opts) {
+        var token = opts.token;
+        if (scopeManagerInst.funct.hasBreakLabel(labelName)) {
+          warning("E011", token, labelName);
+        }
+        else if (state.option.shadow === "outer") {
+          if (scopeManagerInst.funct.has(labelName)) {
+            warning("W004", token, labelName);
+          } else {
+            _checkOuterShadow(labelName, token);
+          }
+        }
+        _current["(breakLabels)"][labelName] = token;
+      }
+    }
+  };
+  return scopeManagerInst;
+};
+
+module.exports = scopeManager;
+
+},{"events":"/node_modules/browserify/node_modules/events/events.js","underscore":"/node_modules/jshint/node_modules/underscore/underscore.js"}],"/node_modules/jshint/src/state.js":[function(_dereq_,module,exports){
 "use strict";
 var NameStack = _dereq_("./name-stack.js");
 
@@ -9896,7 +10114,7 @@ var state = {
   syntax: {},
   isStrict: function() {
     return this.directive["use strict"] || this.inClassBody ||
-      this.option.module;
+      this.option.module || this.option.strict === "implied";
   },
   inMoz: function() {
     return this.option.moz;
@@ -9934,7 +10152,6 @@ var state = {
     this.forinifcheckneeded = false;
     this.nameStack = new NameStack();
     this.inClassBody = false;
-    this.ignoreLinterErrors = false;
   }
 };
 
@@ -9965,7 +10182,7 @@ exports.register = function(linter) {
     }
 
     if (data.name === "__iterator__") {
-      linter.warn("W104", {
+      linter.warn("W103", {
         line: data.line,
         char: data.char,
         data: [ data.name ]
